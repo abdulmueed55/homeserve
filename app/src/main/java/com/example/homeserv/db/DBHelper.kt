@@ -67,7 +67,10 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
-        if (!db.isReadOnly) syncServiceProviderUsers(db)
+        if (!db.isReadOnly) {
+            syncServiceProviderUsers(db)
+            ensureDefaultOffersForProviders(db)
+        }
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -101,7 +104,9 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         return try {
             val userId = insertUser(db, name, phone, password, role)
             if (userId > 0 && role == Roles.PROVIDER) {
-                insertProvider(db, name, phone, serviceType ?: DEFAULT_PROVIDER_SERVICE, userId.toInt())
+                val providerServiceType = serviceType ?: DEFAULT_PROVIDER_SERVICE
+                val providerId = insertProvider(db, name, phone, providerServiceType, userId.toInt())
+                if (providerId > 0) insertDefaultOfferForProvider(db, providerId.toInt(), providerServiceType)
             }
             db.setTransactionSuccessful()
             userId
@@ -137,8 +142,18 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         return list
     }
 
-    fun addProvider(name: String, phone: String, serviceType: String, userId: Int?): Long =
-        insertProvider(writableDatabase, name, phone, serviceType, userId)
+    fun addProvider(name: String, phone: String, serviceType: String, userId: Int?): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val providerId = insertProvider(db, name, phone, serviceType, userId)
+            if (providerId > 0) insertDefaultOfferForProvider(db, providerId.toInt(), serviceType)
+            db.setTransactionSuccessful()
+            providerId
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     private fun insertProvider(db: SQLiteDatabase, name: String, phone: String, serviceType: String, userId: Int?): Long {
         val values = ContentValues().apply {
@@ -157,13 +172,14 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         """.trimIndent(), arrayOf(Roles.PROVIDER))
         c.use {
             while (it.moveToNext()) {
-                insertProvider(
+                val providerId = insertProvider(
                     db,
                     it.getString(it.getColumnIndexOrThrow("name")),
                     it.getString(it.getColumnIndexOrThrow("phone")),
                     DEFAULT_PROVIDER_SERVICE,
                     it.getInt(it.getColumnIndexOrThrow("id"))
                 )
+                if (providerId > 0) insertDefaultOfferForProvider(db, providerId.toInt(), DEFAULT_PROVIDER_SERVICE)
             }
         }
     }
@@ -192,6 +208,37 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
             put("price", price); put("duration", duration); put("created_at", now())
         }
         return db.insert("offers", null, values)
+    }
+
+    private fun insertDefaultOfferForProvider(db: SQLiteDatabase, providerId: Int, serviceType: String): Long {
+        val cleanServiceType = if (serviceType.isBlank()) DEFAULT_PROVIDER_SERVICE else serviceType
+        return insertOffer(
+            db = db,
+            providerId = providerId,
+            title = "$cleanServiceType Service",
+            description = "Professional $cleanServiceType service provider is available for booking. Contact provider for complete details.",
+            price = 0.0,
+            duration = "Contact provider"
+        )
+    }
+
+    private fun ensureDefaultOffersForProviders(db: SQLiteDatabase) {
+        val c = db.rawQuery("""
+            SELECT p.id,p.service_type
+            FROM providers p
+            LEFT JOIN offers o ON o.provider_id = p.id
+            WHERE o.id IS NULL
+            ORDER BY p.id
+        """.trimIndent(), null)
+        c.use {
+            while (it.moveToNext()) {
+                insertDefaultOfferForProvider(
+                    db,
+                    it.getInt(it.getColumnIndexOrThrow("id")),
+                    it.getString(it.getColumnIndexOrThrow("service_type"))
+                )
+            }
+        }
     }
 
     fun getOffers(): List<Offer> {
