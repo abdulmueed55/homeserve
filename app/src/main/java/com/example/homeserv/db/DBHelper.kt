@@ -65,6 +65,11 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         seed(db)
     }
 
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        if (!db.isReadOnly) syncServiceProviderUsers(db)
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         db.execSQL("DROP TABLE IF EXISTS bookings")
         db.execSQL("DROP TABLE IF EXISTS offers")
@@ -77,7 +82,7 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         insertUser(db, "Admin", "0000", "admin123", Roles.ADMIN)
         val customerId = insertUser(db, "Ali Customer", "03000000001", "123456", Roles.CUSTOMER).toInt()
         val providerUserId = insertUser(db, "Usman Provider", "03000000002", "123456", Roles.PROVIDER).toInt()
-        val plumber = insertProvider(db, "Usman Plumbing", "03001112222", "Plumber", providerUserId).toInt()
+        val plumber = insertProvider(db, "Usman Provider", "03000000002", "Plumber", providerUserId).toInt()
         val electrician = insertProvider(db, "Bright Electric", "03003334444", "Electrician", null).toInt()
         val cleaner = insertProvider(db, "CleanPro Team", "03005556666", "Cleaner", null).toInt()
         val carpenter = insertProvider(db, "WoodWorks PK", "03007778888", "Carpenter", null).toInt()
@@ -90,8 +95,20 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
         insertBooking(db, firstOffer, customerId, "Please come after 4 PM.")
     }
 
-    fun registerUser(name: String, phone: String, password: String, role: String): Long =
-        insertUser(writableDatabase, name, phone, password, role)
+    fun registerUser(name: String, phone: String, password: String, role: String, serviceType: String? = null): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val userId = insertUser(db, name, phone, password, role)
+            if (userId > 0 && role == Roles.PROVIDER) {
+                insertProvider(db, name, phone, serviceType ?: DEFAULT_PROVIDER_SERVICE, userId.toInt())
+            }
+            db.setTransactionSuccessful()
+            userId
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     private fun insertUser(db: SQLiteDatabase, name: String, phone: String, password: String, role: String): Long {
         val values = ContentValues().apply {
@@ -129,6 +146,26 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
             if (userId == null) putNull("user_id") else put("user_id", userId)
         }
         return db.insert("providers", null, values)
+    }
+
+    private fun syncServiceProviderUsers(db: SQLiteDatabase) {
+        val c = db.rawQuery("""
+            SELECT u.id,u.name,u.phone
+            FROM users u
+            LEFT JOIN providers p ON p.user_id = u.id
+            WHERE u.role = ? AND p.id IS NULL
+        """.trimIndent(), arrayOf(Roles.PROVIDER))
+        c.use {
+            while (it.moveToNext()) {
+                insertProvider(
+                    db,
+                    it.getString(it.getColumnIndexOrThrow("name")),
+                    it.getString(it.getColumnIndexOrThrow("phone")),
+                    DEFAULT_PROVIDER_SERVICE,
+                    it.getInt(it.getColumnIndexOrThrow("id"))
+                )
+            }
+        }
     }
 
     fun getProviders(): List<Provider> {
@@ -259,5 +296,6 @@ class DBHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_V
     companion object {
         private const val DB_NAME = "homeserv.db"
         private const val DB_VERSION = 1
+        private const val DEFAULT_PROVIDER_SERVICE = "General Service"
     }
 }
